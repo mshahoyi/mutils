@@ -120,7 +120,15 @@ _DEFAULT_IMAGE_ENV = {
 
 def build_image(env: SweepEnv) -> modal.Image:
     """Build the Modal Image from a SweepEnv. Consumer-side env vars are
-    merged on top of `_DEFAULT_IMAGE_ENV` (consumer wins)."""
+    merged on top of `_DEFAULT_IMAGE_ENV` (consumer wins).
+
+    `mutils` is always mounted alongside `env.mount_packages` — the worker
+    bodies (`run_cell_body`, `shepherd_body`) import from it, and pinning
+    a specific mutils via `pip_deps` would defeat the editable-install
+    workflow we use during toolkit iteration. Override by leaving `mutils`
+    out of your local env and pinning `mutils @ git+...` in `pip_deps`
+    instead — modal will then use the pip-installed copy.
+    """
     import modal
 
     return (
@@ -128,7 +136,7 @@ def build_image(env: SweepEnv) -> modal.Image:
         .apt_install(*env.apt_install)
         .uv_pip_install(*env.pip_deps)
         .env({**_DEFAULT_IMAGE_ENV, **env.image_env_vars})
-        .add_local_python_source(*env.mount_packages)
+        .add_local_python_source("mutils", *env.mount_packages)
     )
 
 
