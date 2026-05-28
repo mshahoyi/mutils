@@ -69,7 +69,7 @@ def _parse_kv(rest: str) -> dict[str, str]:
 
 
 def _render(rows: dict[str, CellRow], total_cells: int) -> Table:
-    table = Table(title="pgmp-sweep", expand=True)
+    table = Table(title="mutils-sweep", expand=True)
     table.add_column("cell", overflow="fold")
     table.add_column("status", justify="left")
     table.add_column("util%", justify="right")
@@ -163,7 +163,7 @@ def _auto_pull(
             console.print(
                 f"[red]repo {target.repo_id} returned 404, but no HF_TOKEN was found locally. "
                 f"If the repo is private this looks identical to a missing repo — "
-                f"set HF_TOKEN in env or the project's .env file and re-run `pgmp-sweep pull`.[/]"
+                f"set HF_TOKEN in env or the project's .env file and re-run `mutils-sweep pull`.[/]"
             )
         else:
             console.print(f"[yellow]repo {target.repo_id} doesn't exist yet — nothing to pull.[/]")
@@ -262,7 +262,7 @@ def monitor(
                 # unstructured line — don't render, but stream to a side log so we don't lose it
                 # (skip for v1: keep TUI clean)
     except KeyboardInterrupt:
-        console.print("[yellow]detached.[/] sweep continues; re-attach with `pgmp-sweep monitor " + app_id + "`")
+        console.print("[yellow]detached.[/] sweep continues; re-attach with `mutils-sweep monitor " + app_id + "`")
     finally:
         proc.terminate()
         try:

@@ -225,7 +225,7 @@ def upload_shard(
 
 # ---------------------------------------------------------------------------
 # Local-folder loaders — for downstream code that has already pulled the
-# shards (via `pgmp-sweep pull` or Sweep.output_local auto-pull) and wants to
+# shards (via `mutils-sweep pull` or Sweep.output_local auto-pull) and wants to
 # filter by grid params without re-parsing filenames by hand.
 # ---------------------------------------------------------------------------
 

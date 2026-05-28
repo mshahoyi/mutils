@@ -1,6 +1,6 @@
 [project]
 name = "mutils"
-version = "0.1.0"
+version = "0.2.0"
 description = "Mo's personal research toolkit — activation/weight fuzzing helpers, HF model loaders, Modal sweep orchestrator."
 requires-python = ">=3.12"
 dependencies = [
@@ -46,6 +46,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["mutils", "mutils.sweep"]
+
+[tool.setuptools.package-data]
+"mutils.sweep" = ["*.tmpl"]
 
 [tool.ruff]
 line-length = 140

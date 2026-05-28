@@ -1,0 +1,139 @@
+"""Modal app file for __PROJECT__ sweeps. Scaffolded by `mutils-sweep init`.
+
+Run via the mutils-sweep CLI:
+    mutils-sweep run configs/<name>.py [--no-detach] [--force]
+which shells out to:
+    modal run sweep_runner.py --config configs/<name>.py
+
+The CLI route keeps `@app.function` at module scope (Modal requires this).
+
+ENV below is a Python literal so local and container module-load see
+identical values → Modal Image/App/Secret/Volume object ids match. If you
+need to change ENV, edit it here and re-run; first run rebuilds the image.
+"""
+
+from __future__ import annotations
+
+import modal
+
+from mutils.sweep import SweepEnv
+from mutils.sweep.runner import (
+    DEFAULT_TIMEOUT_S,
+    SHEPHERD_TIMEOUT_S,
+    build_image,
+    build_secrets,
+    build_volume,
+    dispatch_sweep,
+    resolve_timeout_from_argv,
+    run_cell_body,
+    shepherd_body,
+)
+
+# ---------------------------------------------------------------------------
+# Per-project env. Edit this to taste; the rest of the file rarely changes.
+# ---------------------------------------------------------------------------
+
+ENV = SweepEnv(
+    app_name="__PROJECT__-sweep",
+    secret_name="__PROJECT__-sweep",  # set to None if you don't have a Modal secret
+    hf_cache_volume="__PROJECT__-hf-cache",
+    mount_packages=["__PROJECT__"],  # add more if your configs/workers live elsewhere
+    project_root_package="__PROJECT__",  # one of mount_packages — used for container-side root detection
+    pip_deps=[
+        "torch>=2.7.1",
+        "transformers>=4.56,<5",
+        "accelerate>=1.1.1",
+        "peft",
+        "datasets>=3.0",
+        "huggingface_hub>=0.36",
+        "pandas",
+        "numpy",
+        "pyarrow",
+        "tqdm",
+    ],
+    # image_env_vars={"VLLM_USE_DEEP_GEMM": "0"},  # uncomment + extend as needed
+)
+
+# ---------------------------------------------------------------------------
+# Module-load: build Modal objects. Identical local + container.
+# ---------------------------------------------------------------------------
+
+TIMEOUT_S = resolve_timeout_from_argv(default=DEFAULT_TIMEOUT_S)
+
+image = build_image(ENV)
+_secrets = build_secrets(ENV)
+hf_cache_vol = build_volume(ENV)
+
+app = modal.App(ENV.app_name)
+
+_FUNC_KW = dict(
+    image=image,
+    timeout=TIMEOUT_S,
+    secrets=_secrets,
+    volumes={"/root/hf_cache": hf_cache_vol},
+)
+
+# ---------------------------------------------------------------------------
+# Per-GPU workers. Delete the ones you don't need; add more as required.
+# Modal binds GPU at decoration time so we can't switch at call time.
+# ---------------------------------------------------------------------------
+
+
+@app.function(gpu="T4", **_FUNC_KW)
+def run_t4(cell_dict: dict, output_spec: str):
+    return run_cell_body(cell_dict, output_spec, project_root_package=ENV.project_root_package)
+
+
+@app.function(gpu="A10G", **_FUNC_KW)
+def run_a10g(cell_dict: dict, output_spec: str):
+    return run_cell_body(cell_dict, output_spec, project_root_package=ENV.project_root_package)
+
+
+@app.function(gpu="L40S", **_FUNC_KW)
+def run_l40s(cell_dict: dict, output_spec: str):
+    return run_cell_body(cell_dict, output_spec, project_root_package=ENV.project_root_package)
+
+
+@app.function(gpu="A100-40GB", **_FUNC_KW)
+def run_a100_40gb(cell_dict: dict, output_spec: str):
+    return run_cell_body(cell_dict, output_spec, project_root_package=ENV.project_root_package)
+
+
+@app.function(gpu="A100-80GB", **_FUNC_KW)
+def run_a100_80gb(cell_dict: dict, output_spec: str):
+    return run_cell_body(cell_dict, output_spec, project_root_package=ENV.project_root_package)
+
+
+@app.function(gpu="H100", **_FUNC_KW)
+def run_h100(cell_dict: dict, output_spec: str):
+    return run_cell_body(cell_dict, output_spec, project_root_package=ENV.project_root_package)
+
+
+RUNNERS = {
+    "T4": run_t4,
+    "A10G": run_a10g,
+    "L40S": run_l40s,
+    "A100-40GB": run_a100_40gb,
+    "A100-80GB": run_a100_80gb,
+    "H100": run_h100,
+}
+
+# ---------------------------------------------------------------------------
+# Shepherd — one CPU-only function owning per-cell fan-out. See runner.py
+# docstring on why we need this (Modal's detach mode quirk).
+# ---------------------------------------------------------------------------
+
+
+@app.function(image=image, timeout=SHEPHERD_TIMEOUT_S, secrets=_secrets)
+def run_shepherd(cell_payloads: list[tuple[dict, str]], gpu_type: str) -> dict:
+    return shepherd_body(RUNNERS, cell_payloads, gpu_type)
+
+
+# ---------------------------------------------------------------------------
+# Local entrypoint.
+# ---------------------------------------------------------------------------
+
+
+@app.local_entrypoint()
+def main(config: str, force: bool = False) -> None:
+    dispatch_sweep(config, force, RUNNERS, run_shepherd, TIMEOUT_S)

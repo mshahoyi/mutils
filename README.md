@@ -53,3 +53,24 @@ Pin a SHA, not a branch, so old experiments stay reproducible.
 | `all` | everything above |
 
 `mutils.constants` / `mutils.search` / parts of `mutils.utils` work with no extras (just pandas/numpy/tqdm).
+
+## Using `mutils.sweep` in a new project
+
+The sweep orchestrator is per-project: each consumer needs its own Modal app/secret/volume namespace and its own image dep list. mutils provides the library; the consumer owns a thin `sweep_runner.py`. Scaffold it:
+
+```bash
+cd ~/Development/myproject
+uv add "mutils[sweep]"
+mutils-sweep init                  # writes sweep_runner.py at project root
+```
+
+Open the generated `sweep_runner.py`, fill in `ENV` (app name, secret name, volume name, mount packages, pip_deps), and trim the `@app.function(gpu="...")` block to the GPU types you'll use. Then run sweeps the same way as before:
+
+```bash
+mutils-sweep run configs/<name>.py            # full launch with TUI
+mutils-sweep run configs/<name>.py --dry-run  # show cell plan only
+mutils-sweep monitor <app-id>                 # re-attach to a detached sweep
+mutils-sweep pull hf://owner/repo ./out       # download shards
+```
+
+Why the consumer owns the runner file: Modal needs `@app.function` at module scope AND demands identical Image/App/Secret/Volume object ids on local- and container-side module-load. The only thing both sides exec verbatim is the runner file itself — so the `SweepEnv` literal has to live there. mutils provides `build_image / build_secrets / build_volume / run_cell_body / shepherd_body / dispatch_sweep` so the consumer's runner is ~50 lines of mostly declarative config.

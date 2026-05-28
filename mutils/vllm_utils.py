@@ -56,7 +56,7 @@ def _adapter_tmpdir(prefix: str) -> tempfile.TemporaryDirectory:
 
 def _resolve_for_vllm(model_id: str) -> str:
     """vLLM can't load adapter-only HF repos. If `model_id` is one, merge the
-    adapter into the base model, save under `~/.cache/pgmp_merged/<safe>/`, and
+    adapter into the base model, save under `~/.cache/mutils_merged/<safe>/`, and
     return that path. Otherwise return `model_id` unchanged. Cached across runs."""
     from pathlib import Path
 
@@ -71,11 +71,11 @@ def _resolve_for_vllm(model_id: str) -> str:
         return model_id
 
     safe = model_id.replace("/", "__")
-    cache_dir = Path.home() / ".cache" / "pgmp_merged" / safe
+    cache_dir = Path.home() / ".cache" / "mutils_merged" / safe
     if (cache_dir / "config.json").exists():
         return str(cache_dir)
 
-    print(f"[pgmp] merging adapter {model_id} into base model → {cache_dir}")
+    print(f"[mutils] merging adapter {model_id} into base model → {cache_dir}")
     cache_dir.mkdir(parents=True, exist_ok=True)
     import peft
     from transformers import AutoTokenizer

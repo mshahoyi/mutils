@@ -17,6 +17,54 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+# ---------------------------------------------------------------------------
+# SweepEnv — per-project Modal app configuration.
+#
+# Lives as a literal in the consumer's `sweep_runner.py` so local and
+# container module-load produce IDENTICAL Modal Image/App/Secret/Volume
+# object ids. Anything argv- or file-conditional belongs elsewhere (see
+# `mutils.sweep.runner.resolve_timeout_from_argv`, which is safe because
+# Modal binds decorator metadata at deploy time from the local side).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SweepEnv:
+    """Per-project Modal namespace + image inputs. Must be a literal — see module docstring."""
+
+    app_name: str
+    """`modal.App(...)` name. Per-project unique (e.g. "myproject-sweep")."""
+
+    hf_cache_volume: str
+    """`modal.Volume.from_name(...)`. Mounted at /root/hf_cache."""
+
+    mount_packages: list[str]
+    """Python package names passed to `image.add_local_python_source(*...)`.
+    Must include `project_root_package` and any package that holds your
+    sweep configs or worker functions."""
+
+    pip_deps: list[str]
+    """Passed to `image.uv_pip_install(*...)`. Curated minimal list — extend
+    here if a sweep needs a heavier dep. Image is cached server-side so
+    one-time build cost only."""
+
+    project_root_package: str
+    """Name of a mounted package whose `__file__.parent.parent` resolves to
+    the project root inside the container. Used to re-load sweep configs
+    that were registered by path (e.g. `02_thompson_act.py`)."""
+
+    secret_name: str | None = None
+    """`modal.Secret.from_name(...)`. None = no secrets injected."""
+
+    python_version: str = "3.12"
+    """Passed to `modal.Image.debian_slim(python_version=...)`."""
+
+    apt_install: list[str] = field(default_factory=lambda: ["git"])
+    """Passed to `image.apt_install(*...)`."""
+
+    image_env_vars: dict[str, str] = field(default_factory=dict)
+    """Merged on top of the runner's default env vars (HF_HOME, MPLBACKEND, etc.)."""
+
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 

@@ -1,38 +1,41 @@
-"""Modal app file. Run as:
+"""Library entry points for the consumer's Modal sweep runner.
 
-    modal run [--detach] utils/sweep/runner.py --config configs/<name>.py
+The consumer's project owns a thin `sweep_runner.py` (scaffold via
+`mutils-sweep init`) that:
+  1. Declares `ENV: SweepEnv = SweepEnv(app_name=..., ...)` as a literal.
+  2. Builds image/secrets/volume via `build_image / build_secrets / build_volume`.
+  3. Defines one `@app.function(gpu="...")` worker per GPU type, each
+     delegating its body to `run_cell_body`.
+  4. Defines `run_shepherd` delegating to `shepherd_body`.
+  5. Defines `@app.local_entrypoint() main(...)` delegating to `dispatch_sweep`.
 
-The CLI's `pgmp-sweep run` shells out to this. Going through the modal CLI
-keeps `@app.function` at *module scope*, which Modal requires.
+Why the consumer owns the file: Modal requires `@app.function` at module
+scope AND requires that local and container module-load produce identical
+Modal Image/App/Secret/Volume object ids. The only reliable way to feed
+project-specific values into both sides identically is a Python literal
+inside a file that Modal exec's verbatim on both ends — namely the runner
+itself. argv-conditional values do NOT propagate to container module-load
+(documented gotcha — Modal binds decorator metadata at deploy time from
+the local side, so `resolve_timeout_from_argv` is the lone safe exception).
 
-Module-load flow:
-    1. build image from a hardcoded curated dep list (same on local + remote)
-    2. reference the named Modal secret `pgmp-sweep` (same lookup both sides)
-    3. register one `run_*` function per GPU type, ALL with identical
-       image/secrets/volumes — required for container-side module load to
-       resolve the same Modal object dependency set as local-side.
-    4. local_entrypoint reads --config (local-only argv), picks the right
-       run_<gpu> function, spawns missing cells.
-
-Critical pitfall this avoids: anything that reads files at module load
-(pyproject.toml, .env) evaluates differently locally vs in the container,
-producing different image/secret object ids. Modal then rejects the call with
-"Function has N dependencies but container got M object ids". Hence:
-hardcoded deps + named secret instead of file-derived ones.
+`mutils-sweep init` writes the template; the consumer fills in ENV and
+which GPUs they want. See `_template_sweep_runner.py`.
 """
 
 from __future__ import annotations
 
-import importlib.util
+import importlib
+import importlib.util as iu
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import modal
+if TYPE_CHECKING:
+    import modal
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-HF_CACHE_VOL_NAME = "pgmp-sweep-hf-cache"
-SECRET_NAME = "pgmp-sweep"
+    from .types import SweepEnv
+
 DEFAULT_TIMEOUT_S = 60 * 60  # 1h per cell — fallback when no --timeout was passed
 # Modal's max function timeout is 24h. The shepherd is CPU-only and just waits
 # for all per-cell containers, so we always give it the ceiling — it has to
@@ -40,18 +43,16 @@ DEFAULT_TIMEOUT_S = 60 * 60  # 1h per cell — fallback when no --timeout was pa
 SHEPHERD_TIMEOUT_S = 24 * 60 * 60
 
 
+# ---------------------------------------------------------------------------
+# Module-load helpers — called once, locally, before @app.function decorators
+# in the consumer's runner evaluate. On container re-import argv has no
+# --config and the timeout falls back to default; harmless because Modal uses
+# the locally-registered decorator timeout at runtime.
+# ---------------------------------------------------------------------------
+
+
 def _argv_get(flag: str) -> str | None:
-    """Pre-parse a flag value from sys.argv at module load.
-
-    Used so the @app.function decorator can pick up the per-sweep timeout —
-    Modal binds decorator args at module-load time, before main() runs, so
-    we MUST resolve `sweep.timeout` before the decorators evaluate.
-
-    On container re-import argv won't have `--config`, so the read below
-    falls back to DEFAULT_TIMEOUT_S. That's harmless: Modal uses the timeout
-    registered server-side at deploy time (i.e. from local-side decorator
-    metadata), not whatever the container's own re-import sees.
-    """
+    """Pre-parse a flag value from sys.argv at module load."""
     if flag in sys.argv:
         i = sys.argv.index(flag)
         if i + 1 < len(sys.argv):
@@ -59,36 +60,17 @@ def _argv_get(flag: str) -> str | None:
     return None
 
 
-def _import_sweep(config_path: Path):
-    """Load a sweep config file and return its `sweep` symbol."""
-    if str(PROJECT_ROOT) not in sys.path:
-        sys.path.insert(0, str(PROJECT_ROOT))
-    spec = importlib.util.spec_from_file_location("_sweep_config", config_path)
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"could not import {config_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not hasattr(module, "sweep"):
-        raise SystemExit(f"{config_path} must define a top-level `sweep = Sweep(...)`")
-    return module.sweep
+def resolve_timeout_from_argv(default: int = DEFAULT_TIMEOUT_S) -> int:
+    """Read `sweep.timeout` from the --config file in argv at module load.
 
-
-def _resolve_timeout_from_config() -> int:
-    """Read `sweep.timeout` from the --config file passed in argv.
-
-    Local invocation has --config; we import the user's config and bake
-    `sweep.timeout` into the @app.function decorator below. Container
-    re-import has no --config and falls back to DEFAULT_TIMEOUT_S; harmless
-    because Modal uses the locally-registered timeout at runtime.
-
-    Note: PIP_DEPS is NOT configurable per-sweep because the resulting Image
-    object's id must match between local and container module-load. If you
-    need a heavier dep (vllm, etc.), add it to PIP_DEPS unconditionally —
-    one-time build cost, image is cached server-side.
+    Local invocation has --config; we import the user's config and return
+    `sweep.timeout` for the @app.function decorator. Container re-import
+    has no --config and falls back to `default`; harmless because Modal
+    uses the locally-registered timeout at runtime.
     """
     config_path = _argv_get("--config")
     if not config_path:
-        return DEFAULT_TIMEOUT_S
+        return default
     sweep = _import_sweep(Path(config_path).resolve())
     timeout = int(sweep.timeout)
     print(
@@ -98,93 +80,107 @@ def _resolve_timeout_from_config() -> int:
     return timeout
 
 
-TIMEOUT_S = _resolve_timeout_from_config()
+def _import_sweep(config_path: Path):
+    """Load a sweep config file and return its `sweep` symbol.
 
-# Curated minimal dep list for HF inference workloads. Smaller than full
-# pyproject.toml (skips vllm/transformer_lens/inspect_ai/etc.) for faster image
-# builds. Extend here if a sweep config needs more deps.
-PIP_DEPS = [
-    "torch>=2.7.1",
-    "transformers>=4.56,<5",
-    "accelerate>=1.1.1",
-    "peft",
-    "datasets>=3.0",
-    "huggingface_hub>=0.36",
-    "pandas",
-    "numpy",
-    "pyarrow",
-    "tqdm",
-    "jaxtyping",
-    "sentencepiece",
-    "protobuf",
-    "matplotlib",
-    "seaborn",
-    # vLLM for weight-fuzzing experiments. Heavy install but required for
-    # multi-LoRA per-prompt independence (see vllm_weight_fuzz_thompson_search).
-    # Act-fuzzing experiments don't import it — unused-import cost is tiny.
-    "vllm>=0.6",
-]
-
-
-# ---------------------------------------------------------------------------
-# Module-load: build the same image / secrets / volume on local AND remote.
-# No file reads, no argv-derived conditionals — both sides see identical objects.
-# ---------------------------------------------------------------------------
-
-_secrets = [modal.Secret.from_name(SECRET_NAME)]
-hf_cache_vol = modal.Volume.from_name(HF_CACHE_VOL_NAME, create_if_missing=True)
-
-image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git")
-    .uv_pip_install(*PIP_DEPS)
-    .env(
-        {
-            "MPLBACKEND": "Agg",
-            "HF_HOME": "/root/hf_cache",
-            "HF_HUB_ENABLE_HF_TRANSFER": "0",
-            "TOKENIZERS_PARALLELISM": "false",
-            "PYTHONUNBUFFERED": "1",
-            # vLLM 0.20+ tries to load DeepGEMM kernels on H100 even for bf16
-            # models (it's wired into the default FP8 path). The package isn't
-            # in our image and isn't trivially pip-installable; bf16 inference
-            # works fine on the FlashAttention/cutlass fallbacks. Disabling.
-            "VLLM_USE_DEEP_GEMM": "0",
-        }
-    )
-    .add_local_python_source("utils", "experiments")
-)
-
-app = modal.App("pgmp-sweep")
-
-
-# ---------------------------------------------------------------------------
-# Per-cell worker body
-# ---------------------------------------------------------------------------
-
-
-def _container_project_root() -> Path:
-    """Find the project root inside the Modal container. `mutils` is mounted via
-    `add_local_python_source`; its package dir's parent is the project root."""
-    import mutils as _u
-
-    return Path(_u.__file__).resolve().parent.parent
-
-
-def _load_sweep_config_module(config_relpath: str):
-    """Container-side mirror of `_import_sweep`.
-
-    The local CLI loads the user config file via `spec_from_file_location` with
-    a fixed fake module name `_sweep_config`. That makes `fn.__module__ ==
-    '_sweep_config'` for any function defined in the config — including ones
-    whose actual filename (e.g. `02_thompson_act.py`) is not a valid Python
-    module name. So on the container side we have to load the SAME file by
-    path under the SAME fake name, and register it in `sys.modules` so a later
-    `import_module('_sweep_config')` succeeds.
+    Uses `Path.cwd()` as the project root (modal is invoked from there by
+    the CLI). The config file is registered under the fake module name
+    `_sweep_config` so functions defined in files whose names aren't valid
+    Python module identifiers (e.g. `02_thompson_act.py`) still resolve.
     """
-    import importlib.util as iu
+    project_root = Path.cwd()
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    spec = iu.spec_from_file_location("_sweep_config", config_path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"could not import {config_path}")
+    module = iu.module_from_spec(spec)
+    sys.modules["_sweep_config"] = module
+    spec.loader.exec_module(module)
+    if not hasattr(module, "sweep"):
+        raise SystemExit(f"{config_path} must define a top-level `sweep = Sweep(...)`")
+    return module.sweep
 
-    abs_path = _container_project_root() / config_relpath
+
+# ---------------------------------------------------------------------------
+# Modal object builders — pure functions of SweepEnv. Called from the
+# consumer's runner at module load on BOTH local and container, with the
+# same ENV literal, producing identical Modal object ids on both sides.
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_IMAGE_ENV = {
+    "MPLBACKEND": "Agg",
+    "HF_HOME": "/root/hf_cache",
+    "HF_HUB_ENABLE_HF_TRANSFER": "0",
+    "TOKENIZERS_PARALLELISM": "false",
+    "PYTHONUNBUFFERED": "1",
+}
+
+
+def build_image(env: SweepEnv) -> modal.Image:
+    """Build the Modal Image from a SweepEnv. Consumer-side env vars are
+    merged on top of `_DEFAULT_IMAGE_ENV` (consumer wins)."""
+    import modal
+
+    return (
+        modal.Image.debian_slim(python_version=env.python_version)
+        .apt_install(*env.apt_install)
+        .uv_pip_install(*env.pip_deps)
+        .env({**_DEFAULT_IMAGE_ENV, **env.image_env_vars})
+        .add_local_python_source(*env.mount_packages)
+    )
+
+
+def build_secrets(env: SweepEnv) -> list:
+    """Build the Modal Secret list (empty if `env.secret_name is None`)."""
+    import modal
+
+    if env.secret_name is None:
+        return []
+    return [modal.Secret.from_name(env.secret_name)]
+
+
+def build_volume(env: SweepEnv) -> modal.Volume:
+    """Build the HF-cache Volume. `create_if_missing=True` so first-run
+    on a new project doesn't require a manual `modal volume create`."""
+    import modal
+
+    return modal.Volume.from_name(env.hf_cache_volume, create_if_missing=True)
+
+
+# ---------------------------------------------------------------------------
+# Container-side helpers — used inside the consumer's @app.function bodies.
+# `project_root_package` is threaded through explicitly rather than read from
+# a module global so the same function works for any consumer.
+# ---------------------------------------------------------------------------
+
+
+def _container_project_root(project_root_package: str) -> Path:
+    """Find the project root inside the Modal container.
+
+    The package is mounted via `add_local_python_source`; its `__file__`'s
+    grandparent is the project root (where the consumer's `pyproject.toml`
+    lives). Assumes a conventional layout where `mount_packages` includes
+    a single top-level package directly under the project root.
+    """
+    pkg = importlib.import_module(project_root_package)
+    if not getattr(pkg, "__file__", None):
+        raise RuntimeError(
+            f"{project_root_package!r} has no __file__ — namespace package? "
+            "project_root_package must be a regular package with __init__.py."
+        )
+    return Path(pkg.__file__).resolve().parent.parent
+
+
+def _load_sweep_config_module(config_relpath: str, project_root_package: str):
+    """Container-side mirror of `_import_sweep`. The local CLI loads the
+    user config via `spec_from_file_location` under the fake module name
+    `_sweep_config`; we have to load the SAME file by path under the SAME
+    name on the container so `_import_callable` can resolve worker fns
+    whose `__module__` ended up as `_sweep_config`.
+    """
+    abs_path = _container_project_root(project_root_package) / config_relpath
     if not abs_path.is_file():
         raise FileNotFoundError(f"sweep config not found in container: {abs_path}")
     spec = iu.spec_from_file_location("_sweep_config", abs_path)
@@ -196,33 +192,36 @@ def _load_sweep_config_module(config_relpath: str):
     return module
 
 
-def _import_callable(import_path: str, config_relpath: str | None = None):
+def _import_callable(import_path: str, *, config_relpath: str | None, project_root_package: str):
     """Resolve `module:function` to a callable. If the module is the fake
     `_sweep_config` (set by the local config loader for non-importable file
     names), load the config file by path on the container side first."""
-    import importlib
-
     module_name, fn_name = import_path.split(":")
     if module_name == "_sweep_config":
         if not config_relpath:
-            raise RuntimeError("fn_path uses _sweep_config but no config_relpath was sent — cell payload is missing it")
-        module = sys.modules.get("_sweep_config") or _load_sweep_config_module(config_relpath)
+            raise RuntimeError(
+                "fn_path uses _sweep_config but no config_relpath was sent — cell payload is missing it"
+            )
+        module = sys.modules.get("_sweep_config") or _load_sweep_config_module(
+            config_relpath, project_root_package
+        )
     else:
         module = importlib.import_module(module_name)
     return getattr(module, fn_name)
 
 
-def _run_cell_body(cell_dict: dict, output_spec: str) -> list:
-    """Container-side: import the user fn (and saver, if any), run, upload.
+def run_cell_body(cell_dict: dict, output_spec: str, *, project_root_package: str) -> list:
+    """Container-side body of a per-cell @app.function. Consumer's runner
+    delegates each `@app.function(gpu="...")` worker to this.
 
     `cell_dict` carries `fn_path`, `params`, optional `saver_path`, and
     optional `config_relpath` (set when the user fn lives in a path-loaded
     config rather than a directly-importable module).
     Returns the list of paths-in-repo uploaded for this cell.
     """
-    from mutils.sweep import sidecar
-    from mutils.sweep.storage import default_saver, parse_output, upload_shard
-    from mutils.sweep.types import Cell
+    from . import sidecar
+    from .storage import default_saver, parse_output, upload_shard
+    from .types import Cell
 
     cell = Cell(fn_path=cell_dict["fn_path"], params=cell_dict["params"])
     saver_path = cell_dict.get("saver_path")
@@ -231,8 +230,16 @@ def _run_cell_body(cell_dict: dict, output_spec: str) -> list:
     stop = sidecar.start(cell.hash)
 
     try:
-        fn = _import_callable(cell.fn_path, config_relpath=config_relpath)
-        saver = _import_callable(saver_path, config_relpath=config_relpath) if saver_path else default_saver
+        fn = _import_callable(
+            cell.fn_path, config_relpath=config_relpath, project_root_package=project_root_package
+        )
+        saver = (
+            _import_callable(
+                saver_path, config_relpath=config_relpath, project_root_package=project_root_package
+            )
+            if saver_path
+            else default_saver
+        )
 
         sidecar.emit_status(cell.hash, "running")
         return_value = fn(**cell.params)
@@ -251,81 +258,19 @@ def _run_cell_body(cell_dict: dict, output_spec: str) -> list:
         stop.set()
 
 
-# ---------------------------------------------------------------------------
-# Pre-registered functions, one per GPU type. All identical except `gpu=`.
-# Modal binds GPU at decoration time so we can't switch at call time.
-# ---------------------------------------------------------------------------
+def shepherd_body(runners: dict, cell_payloads: list, gpu_type: str) -> dict:
+    """Container-side body of `run_shepherd`. Consumer's runner delegates
+    its single `@app.function(...)` shepherd to this, passing the local
+    `RUNNERS` dict it built.
 
-_FUNC_KW = dict(
-    image=image,
-    timeout=TIMEOUT_S,
-    secrets=_secrets,
-    volumes={"/root/hf_cache": hf_cache_vol},
-)
-
-
-@app.function(gpu="T4", **_FUNC_KW)
-def run_t4(cell_dict: dict, output_spec: str) -> str:
-    return _run_cell_body(cell_dict, output_spec)
-
-
-@app.function(gpu="L4", **_FUNC_KW)
-def run_l4(cell_dict: dict, output_spec: str) -> str:
-    return _run_cell_body(cell_dict, output_spec)
-
-
-@app.function(gpu="A10G", **_FUNC_KW)
-def run_a10g(cell_dict: dict, output_spec: str) -> str:
-    return _run_cell_body(cell_dict, output_spec)
-
-
-@app.function(gpu="L40S", **_FUNC_KW)
-def run_l40s(cell_dict: dict, output_spec: str) -> str:
-    return _run_cell_body(cell_dict, output_spec)
-
-
-@app.function(gpu="A100-40GB", **_FUNC_KW)
-def run_a100_40gb(cell_dict: dict, output_spec: str) -> str:
-    return _run_cell_body(cell_dict, output_spec)
-
-
-@app.function(gpu="A100-80GB", **_FUNC_KW)
-def run_a100_80gb(cell_dict: dict, output_spec: str) -> str:
-    return _run_cell_body(cell_dict, output_spec)
-
-
-@app.function(gpu="H100", **_FUNC_KW)
-def run_h100(cell_dict: dict, output_spec: str) -> str:
-    return _run_cell_body(cell_dict, output_spec)
-
-
-RUNNERS = {
-    "T4": run_t4,
-    "L4": run_l4,
-    "A10G": run_a10g,
-    "L40S": run_l40s,
-    "A100-40GB": run_a100_40gb,
-    "A100-80GB": run_a100_80gb,
-    "H100": run_h100,
-}
-
-
-# ---------------------------------------------------------------------------
-# Shepherd — single CPU-only function that owns the cell fan-out.
-#
-# Modal's detach mode keeps "only the last triggered function from the local
-# entrypoint" alive after parent disconnect. If we spawn N cells from local,
-# N-1 of them get killed when the CLI exits. So instead we spawn ONE
-# shepherd; inside it, `runner.starmap(...)` fans out to N concurrent cell
-# containers — those are spawned from inside Modal, where the limitation
-# doesn't apply.
-# ---------------------------------------------------------------------------
-
-
-@app.function(image=image, timeout=SHEPHERD_TIMEOUT_S, secrets=_secrets)
-def run_shepherd(cell_payloads: list[tuple[dict, str]], gpu_type: str) -> dict:
-    """Fan out cells to the right per-GPU runner. Blocks until all done."""
-    runner = RUNNERS[gpu_type]
+    Modal's detach mode keeps "only the last triggered function from the
+    local entrypoint" alive after parent disconnect. If we spawned N cells
+    from local, N-1 of them would get killed when the CLI exits. So we
+    spawn ONE shepherd; `runner.starmap(...)` inside it fans out to N
+    concurrent cell containers — those are spawned from inside Modal,
+    where the detach limitation doesn't apply.
+    """
+    runner = runners[gpu_type]
     print(f"[shepherd] starmap of {len(cell_payloads)} cells onto {gpu_type}")
     results = list(runner.starmap(cell_payloads, return_exceptions=True))
     n_done = sum(1 for r in results if not isinstance(r, Exception))
@@ -335,59 +280,54 @@ def run_shepherd(cell_payloads: list[tuple[dict, str]], gpu_type: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Local entrypoint — only runs locally, so reading --config-derived state here
-# is fine (no remote dependency on it).
+# Local entrypoint body — only runs locally, so reading --config-derived
+# state here is fine (no remote dependency on it).
 # ---------------------------------------------------------------------------
 
 
-@app.local_entrypoint()
-def main(config: str, force: bool = False) -> None:
-    """Spawn the shepherd; it fans out to one Modal call per missing cell.
+def dispatch_sweep(
+    config: str,
+    force: bool,
+    runners: dict,
+    shepherd,
+    timeout_s_at_module_load: int,
+    default_timeout_s: int = DEFAULT_TIMEOUT_S,
+) -> None:
+    """Body of the consumer's `@app.local_entrypoint()` main().
 
-    With `--force`, every cell is run regardless of whether its shard already
-    exists in the HF dataset (overwrites on upload).
-
-    Per-cell timeout is read from `sweep.timeout` in the config — the
-    argv-pre-parse at the top of this module does it before the
-    @app.function decorators evaluate. We assert below that the timeout
-    we see now matches what got baked into the decorator at module load.
+    Re-imports the sweep config (now that argv parsing has finished),
+    validates against the timeout baked into the @app.function decorators
+    at module load, and spawns the shepherd with one payload per cell.
     """
-    from mutils.sweep.storage import missing_cells
+    from .storage import missing_cells, resolve_hf_token
 
     config_abs = Path(config).resolve()
     sweep = _import_sweep(config_abs)
-    if sweep.gpu not in RUNNERS:
-        raise SystemExit(f"unknown gpu '{sweep.gpu}'. choices: {list(RUNNERS)}")
-    if int(sweep.timeout) != TIMEOUT_S:
+    if sweep.gpu not in runners:
+        raise SystemExit(f"unknown gpu '{sweep.gpu}'. choices: {list(runners)}")
+    if int(sweep.timeout) != timeout_s_at_module_load:
         raise SystemExit(
-            f"internal: module-load read timeout={TIMEOUT_S}s but main re-loaded "
+            f"internal: module-load read timeout={timeout_s_at_module_load}s but main re-loaded "
             f"the config and saw sweep.timeout={sweep.timeout}s — config changed "
             f"between module-load and main()?"
         )
-    # Loud confirmation: print the timeout that was actually baked into the
-    # @app.function decorators above. If this prints DEFAULT_TIMEOUT_S=3600
-    # when the sweep config asked for something else, ABORT before launching.
     print(
-        f"[runner] cell timeout = {TIMEOUT_S}s ({TIMEOUT_S / 3600:.2f}h) | gpu = {sweep.gpu} | concurrency = {sweep.concurrency}",
+        f"[runner] cell timeout = {timeout_s_at_module_load}s "
+        f"({timeout_s_at_module_load / 3600:.2f}h) | gpu = {sweep.gpu} | concurrency = {sweep.concurrency}",
         flush=True,
     )
-    if TIMEOUT_S == DEFAULT_TIMEOUT_S and int(sweep.timeout) != DEFAULT_TIMEOUT_S:
+    if timeout_s_at_module_load == default_timeout_s and int(sweep.timeout) != default_timeout_s:
         raise SystemExit(
-            f"FATAL: argv pre-parse fell back to DEFAULT_TIMEOUT_S={DEFAULT_TIMEOUT_S}s but "
+            f"FATAL: argv pre-parse fell back to default_timeout_s={default_timeout_s}s but "
             f"sweep.timeout={sweep.timeout}s. The decorators were baked with the wrong value. "
             f"This would silently truncate cells. Refusing to launch."
         )
 
-    # Make the config file findable on the container via a project-root-relative
-    # path. Required when the file's own name isn't a valid Python module
-    # (e.g. `02_thompson_act.py`), because the user fn's __module__ ends up as
-    # the fake `_sweep_config` and the worker has to re-load by path.
+    project_root = Path.cwd()
     try:
-        config_relpath = str(config_abs.relative_to(PROJECT_ROOT))
+        config_relpath = str(config_abs.relative_to(project_root))
     except ValueError as e:
-        raise SystemExit(f"config {config_abs} must live under project root {PROJECT_ROOT}") from e
-
-    from mutils.sweep.storage import resolve_hf_token
+        raise SystemExit(f"config {config_abs} must live under project root {project_root}") from e
 
     if force:
         cells = sweep.cells()
@@ -415,5 +355,5 @@ def main(config: str, force: bool = False) -> None:
         )
         for c in cells
     ]
-    run_shepherd.spawn(payloads, sweep.gpu)
+    shepherd.spawn(payloads, sweep.gpu)
     print(f"[sweep] spawned shepherd → {len(cells)} cells on {sweep.gpu}")

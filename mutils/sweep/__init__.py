@@ -12,11 +12,12 @@ Usage lives in `configs/*.py`; the CLI is in `mutils.sweep.cli`.
 """
 
 from .storage import default_saver, find_shards, load_pickles, load_shards
-from .types import Cell, Sweep
+from .types import Cell, Sweep, SweepEnv
 
 __all__ = [
     "Cell",
     "Sweep",
+    "SweepEnv",
     "default_saver",
     "find_shards",
     "load_pickles",

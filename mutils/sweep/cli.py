@@ -1,15 +1,15 @@
-"""`pgmp-sweep` CLI: run, monitor, pull, logs.
+"""`mutils-sweep` CLI: init, run, monitor, pull, logs.
 
 Usage:
-    pgmp-sweep run     configs/act_fuzz_random_one.py [--no-detach] [--dry-run]
-    pgmp-sweep monitor <app-id>
-    pgmp-sweep pull    hf://owner/repo[/subdir] <local-dir>
-    pgmp-sweep logs    <app-id>
+    mutils-sweep init                                       # scaffold sweep_runner.py + sweep_configs/
+    mutils-sweep run     configs/<name>.py [--no-detach] [--dry-run] [--force]
+    mutils-sweep monitor <app-id> [--output ...] [--pull-to ...] [--total N]
+    mutils-sweep pull    hf://owner/repo[/subdir] <local-dir>
+    mutils-sweep logs    <app-id>
 
-The `run` command shells out to `modal run [--detach] utils/sweep/runner.py`.
-We parse the printed app id from Modal's stdout. Going through the modal CLI
-(rather than `app.run()` programmatically) is what keeps `@app.function` at
-module scope — Modal rejects function definitions inside other functions.
+`run` shells out to `modal run [--detach] <project>/sweep_runner.py` (which
+the consumer owns — see `init`). Going through the modal CLI rather than
+`app.run()` keeps `@app.function` at module scope, which Modal requires.
 """
 
 from __future__ import annotations
@@ -24,30 +24,88 @@ import typer
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
-# Module path to the Modal app file. Resolved relative to project root at runtime
-# so the CLI works regardless of cwd.
-RUNNER_REL_PATH = "utils/sweep/runner.py"
-
+# Default location of the consumer's runner inside their project. The user
+# can move it; `run` takes a `--runner` override.
+DEFAULT_RUNNER_NAME = "sweep_runner.py"
 APP_ID_RE = re.compile(r"\b(ap-[A-Za-z0-9]+)\b")
 
 
 def _project_root() -> Path:
-    """Walk up from this file to the project root (the one with pyproject.toml)."""
-    p = Path(__file__).resolve()
-    for parent in [p, *p.parents]:
+    """Walk up from cwd looking for `pyproject.toml`. This is the consumer's
+    project root, where `sweep_runner.py` lives and where Modal will resolve
+    `add_local_python_source` mounts from."""
+    cwd = Path.cwd().resolve()
+    for parent in [cwd, *cwd.parents]:
         if (parent / "pyproject.toml").exists():
             return parent
-    raise SystemExit("could not find project root (no pyproject.toml in any parent)")
+    raise SystemExit("could not find project root (no pyproject.toml in cwd or any parent)")
+
+
+def _runner_path(override: Path | None) -> Path:
+    """Resolve the consumer's runner path. Defaults to <project_root>/sweep_runner.py.
+    Errors with `init` hint if missing."""
+    if override is not None:
+        p = override.resolve()
+        if not p.is_file():
+            raise SystemExit(f"runner not found: {p}")
+        return p
+    p = _project_root() / DEFAULT_RUNNER_NAME
+    if not p.is_file():
+        raise SystemExit(
+            f"no {DEFAULT_RUNNER_NAME} in project root ({p.parent}). "
+            f"Run `mutils-sweep init` to scaffold one, or pass --runner."
+        )
+    return p
+
+
+@app.command()
+def init(
+    project: str = typer.Option(
+        None,
+        "--project",
+        "-p",
+        help="Project slug used for app/secret/volume names (defaults to project root dirname).",
+    ),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing sweep_runner.py."),
+) -> None:
+    """Scaffold `sweep_runner.py` in the project root with __PROJECT__ replaced.
+
+    The generated file declares a `SweepEnv` literal naming this project's
+    Modal app/secret/volume and lists the GPU types you want. Edit ENV (and
+    add/remove `@app.function(gpu="...")` workers) before launching a sweep.
+    """
+    root = _project_root()
+    project = project or root.name
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project):
+        raise SystemExit(
+            f"--project={project!r} not a valid slug; use lowercase letters, digits, -, _"
+        )
+
+    dest = root / DEFAULT_RUNNER_NAME
+    if dest.exists() and not force:
+        raise SystemExit(f"{dest} already exists — pass --force to overwrite.")
+
+    template_path = Path(__file__).parent / "_template_sweep_runner.py.tmpl"
+    rendered = template_path.read_text().replace("__PROJECT__", project)
+    dest.write_text(rendered)
+    typer.echo(f"[init] wrote {dest}  (project={project})")
+    typer.echo("[init] next: open it, trim the GPU list / pip_deps to your project, then:")
+    typer.echo(f"[init]   mutils-sweep run <config>.py")
 
 
 @app.command()
 def run(
     config: Path = typer.Argument(..., exists=True, dir_okay=False, help="Path to a config file defining `sweep`."),
+    runner: Path = typer.Option(
+        None,
+        "--runner",
+        help=f"Override the runner path (default: <project_root>/{DEFAULT_RUNNER_NAME}).",
+    ),
     detach: bool = typer.Option(True, "--detach/--no-detach", help="Detach from the Modal app after spawning (default)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the cell plan without launching."),
     monitor_after: bool = typer.Option(True, "--monitor/--no-monitor", help="Open the live TUI after launch."),
     force: bool = typer.Option(False, "--force", "-f", help="Re-run all cells even if their shards already exist in the HF dataset."),
-):
+) -> None:
     """Launch a sweep from a config file."""
     from .runner import _import_sweep
     from .storage import existing_shards, parse_output, resolve_hf_token
@@ -100,15 +158,15 @@ def run(
         return
 
     project_root = _project_root()
-    runner_path = project_root / RUNNER_REL_PATH
+    runner_path = _runner_path(runner)
     cmd = ["modal", "run"]
     if detach:
         cmd.append("--detach")
     cmd += [str(runner_path), "--config", str(config.resolve())]
     if force:
         cmd.append("--force")
-    # NB: cell timeout comes from `sweep.timeout` in the config, read by
-    # runner.py at module load via argv-pre-parse of `--config`. Don't add
+    # NB: cell timeout comes from `sweep.timeout` in the config, read by the
+    # runner at module load via argv-pre-parse of `--config`. Don't add
     # `--timeout` here — the sweep config is the source of truth.
 
     typer.echo(f"[sweep] {' '.join(cmd)}")
@@ -172,7 +230,7 @@ def monitor(
     ),
     pull_to: Path | None = typer.Option(None, "--pull-to", help="Local dir; pull shards here once all cells are terminal."),
     total_cells: int | None = typer.Option(None, "--total", help="Cell count (used to detect completion when re-attaching)."),
-):
+) -> None:
     """Re-attach to an existing sweep's live TUI. Optional auto-pull on completion."""
     from .tui import monitor as monitor_cmd
 
@@ -187,7 +245,7 @@ def monitor(
 
 
 @app.command()
-def logs(app_id: str = typer.Argument(...)):
+def logs(app_id: str = typer.Argument(...)) -> None:
     """Raw `modal app logs` passthrough."""
     os.execvp("modal", ["modal", "app", "logs", app_id])
 
@@ -196,7 +254,7 @@ def logs(app_id: str = typer.Argument(...)):
 def pull(
     output: str = typer.Argument(..., help="hf URI like hf://owner/repo or hf://owner/repo/subdir"),
     local_dir: Path = typer.Argument(..., file_okay=False),
-):
+) -> None:
     """Download all shards (any extension) from an HF dataset to a local directory."""
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import RepositoryNotFoundError
