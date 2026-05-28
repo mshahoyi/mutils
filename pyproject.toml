@@ -1,0 +1,61 @@
+[project]
+name = "mutils"
+version = "0.1.0"
+description = "Mo's personal research toolkit — activation/weight fuzzing helpers, HF model loaders, Modal sweep orchestrator."
+requires-python = ">=3.12"
+dependencies = [
+    "pandas",
+    "numpy",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+ml = [
+    "torch>=2.7",
+    "transformers>=4.56,<5",
+    "transformer_lens>=3.0.0,<4",
+    "accelerate>=1.1",
+    "peft",
+    "datasets>=3.0",
+    "jaxtyping",
+    "huggingface_hub[cli]>=0.36",
+    "scipy",
+    "sentencepiece",
+    "protobuf",
+]
+sweep = [
+    "modal>=1.0",
+    "typer>=0.20",
+    "rich>=14.2",
+    "pyarrow",
+    "huggingface_hub[cli]>=0.36",
+]
+vllm = [
+    "vllm>=0.19.1",
+]
+all = [
+    "mutils[ml,sweep,vllm]",
+]
+
+[project.scripts]
+mutils-sweep = "mutils.sweep.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mutils", "mutils.sweep"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# vendored helper: star imports + jaxtyping shape strings in annotations
+"mutils/ez.py" = ["F403", "F405", "F722", "E701"]
+# constants.py holds long pre-computed strings and numeric literals
+"mutils/constants.py" = ["E501"]
