@@ -33,19 +33,26 @@ sweep = [
 vllm = [
     "vllm>=0.19.1",
 ]
+modal-vllm = [
+    "modal>=1.0",
+    "typer>=0.20",
+    "rich>=14.2",
+    "huggingface_hub[cli]>=0.36",
+]
 all = [
-    "mutils[ml,sweep,vllm]",
+    "mutils[ml,sweep,vllm,modal-vllm]",
 ]
 
 [project.scripts]
 mutils-sweep = "mutils.sweep.cli:main"
+vllm-model = "mutils.modal_vllm.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["mutils", "mutils.sweep"]
+packages = ["mutils", "mutils.sweep", "mutils.modal_vllm"]
 
 [tool.setuptools.package-data]
 "mutils.sweep" = ["*.tmpl"]

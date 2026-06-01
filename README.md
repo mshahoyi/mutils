@@ -42,6 +42,7 @@ Pin a SHA, not a branch, so old experiments stay reproducible.
 - `mutils.data` — HF dataset loaders
 - `mutils.utils` — misc helpers (tokenization, perplexity, top-k)
 - `mutils.sweep` — fan a python function over a parameter grid onto Modal GPUs
+- `mutils.modal_vllm` — provision a vLLM OpenAI server on Modal, auto-sized from the model (`vllm-model` CLI + `ModalVLLM` class)
 
 ## Extras matrix
 
@@ -50,9 +51,46 @@ Pin a SHA, not a branch, so old experiments stay reproducible.
 | `ml` | torch, transformers, transformer_lens, peft, accelerate, datasets, jaxtyping, scipy, huggingface_hub |
 | `sweep` | modal, typer, rich, pyarrow, huggingface_hub |
 | `vllm` | vllm |
+| `modal-vllm` | modal, typer, rich, huggingface_hub |
 | `all` | everything above |
 
 `mutils.constants` / `mutils.search` / parts of `mutils.utils` work with no extras (just pandas/numpy/tqdm).
+
+## Serving a model on Modal with `mutils.modal_vllm`
+
+Like `vllm serve`, but it provisions GPUs on Modal and hands back an OpenAI-compatible URL.
+GPU type/count, tensor-parallel size and `max-model-len` are auto-sized from the model's HF
+metadata (params × dtype → smallest valid tensor-parallel fit), all overridable.
+
+```bash
+uv add "mutils[modal-vllm]"
+
+vllm-model plan  Qwen/Qwen2.5-72B-Instruct                # show the auto-sized plan (no deploy)
+vllm-model serve meta-llama/Llama-3.3-70B-Instruct \      # deploy + print endpoint URL
+    --lora adv_high=org/llama70b-redteam-high \
+    --lora adv_kto=org/llama70b-redteam-kto
+vllm-model stop  vllm-llama-3-3-70b-instruct              # tear down
+```
+
+Programmatic (the reason this exists — drop a remote vLLM into any project):
+
+```python
+from mutils.modal_vllm import ModalVLLM
+
+server = ModalVLLM("meta-llama/Llama-3.3-70B-Instruct",
+                   lora_modules={"adv_high": "org/llama70b-redteam-high"})
+url = server.start()                 # deploys, blocks until /v1/models is live
+client = OpenAI(base_url=server.base_url, api_key="x")   # f"{url}/v1"
+...
+server.stop()
+
+# or ephemeral:
+with ModalVLLM("Qwen/Qwen2.5-7B-Instruct") as url:
+    ...
+```
+
+Gated models read `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` from the env. Keep `min_containers=1`
+(default) for warm iteration; raise `max_containers` for the autoscaling/parallel phase.
 
 ## Using `mutils.sweep` in a new project
 
