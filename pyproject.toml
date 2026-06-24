@@ -2,7 +2,7 @@
 name = "mutils"
 version = "0.2.0"
 description = "Mo's personal research toolkit — activation/weight fuzzing helpers, HF model loaders, Modal sweep orchestrator."
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "pandas",
     "numpy",
