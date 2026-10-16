@@ -41,6 +41,7 @@ Pin a SHA, not a branch, so old experiments stay reproducible.
 - `mutils.constants` — prompt templates, in-context secret strings
 - `mutils.data` — HF dataset loaders
 - `mutils.utils` — misc helpers (tokenization, perplexity, top-k)
+- `mutils.viz` — `token_heatmap_html`: text coloured per token by a value (e.g. probe projections), as HTML
 - `mutils.sweep` — fan a python function over a parameter grid onto Modal GPUs
 - `mutils.modal_vllm` — provision a vLLM OpenAI server on Modal, auto-sized from the model (`vllm-model` CLI + `ModalVLLM` class)
 
