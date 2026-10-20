@@ -43,8 +43,10 @@ Pin a SHA, not a branch, so old experiments stay reproducible.
 - `mutils.utils` — misc helpers (tokenization, perplexity, top-k)
 - `mutils.viz` — `token_heatmap_html`: text coloured per token by a value (e.g. probe projections), as HTML;
   `token_heatmap_explorer`: interactive page with a dropdown per dimension (prompt, layer, ...), hover values and a show-values toggle
+  `in_iframe`: wrap such a page so it stays interactive in notebook outputs (e.g. VS Code)
 - `mutils.sweep` — fan a python function over a parameter grid onto Modal GPUs
 - `mutils.modal_vllm` — provision a vLLM OpenAI server on Modal, auto-sized from the model (`vllm-model` CLI + `ModalVLLM` class)
+- `mutils.vast` — turn a vast.ai instance into a ready dev box: Claude Code, gh login, your repos, an SSH entry T3 can use (`vast-box` CLI)
 
 ## Extras matrix
 
@@ -54,6 +56,7 @@ Pin a SHA, not a branch, so old experiments stay reproducible.
 | `sweep` | modal, typer, rich, pyarrow, huggingface_hub |
 | `vllm` | vllm |
 | `modal-vllm` | modal, typer, rich, huggingface_hub |
+| `vast` | typer, rich |
 | `all` | everything above |
 
 `mutils.constants` / `mutils.search` / parts of `mutils.utils` work with no extras (just pandas/numpy/tqdm).
@@ -93,6 +96,37 @@ with ModalVLLM("Qwen/Qwen2.5-7B-Instruct") as url:
 
 Gated models read `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` from the env. Keep `min_containers=1`
 (default) for warm iteration; raise `max_containers` for the autoscaling/parallel phase.
+
+## Dev boxes on vast.ai with `mutils.vast`
+
+Rent a GPU in the vast console, hand `vast-box` the instance id, and get a box with Claude Code
+(logged in on your subscription), gh (logged in as you), your repos cloned with their Python envs
+installed, API keys in each repo's `.env`, and `Host vast-<id>` in your SSH config for T3/Cursor/ssh.
+
+```bash
+uv tool install -e "~/dev/mutils[vast]"   # puts `vast-box` on PATH
+
+vast-box init        # once: ~/.config/vast-box/{config.toml,secrets.env}, SSH key, vast API key
+claude setup-token   # once: paste the token into ~/.config/vast-box/secrets.env
+vast-box template    # once: your vast template = official PyTorch template + provision.sh at boot
+
+vast-box up 12345678 # per box, after renting it from that template. Re-run any time.
+ssh vast-12345678    # or in T3: add an SSH environment → vast-12345678
+```
+
+- **Config**: `~/.config/vast-box/config.toml` lists repos (`owner/name`, `owner/name@branch`, or a git URL) and
+  which `~/.claude` files to copy. `vast-box up <id> --repo owner/x` overrides the list for one box.
+- **Secrets**: `~/.config/vast-box/secrets.env` (chmod 600). Exported in the box's shells except `ANTHROPIC_API_KEY`
+  (it would outrank the subscription token and bill the API), and written into each repo's `.env` (kept out of git via
+  `.git/info/exclude`) except `CLAUDE_CODE_OAUTH_TOKEN`. The GitHub token comes from `gh auth token`.
+- **Python envs**: uv projects (`uv.lock` / `[tool.uv]`) get `uv sync`; anything else is `uv pip install -e .` into the
+  template's `/venv/main`, reusing its torch. Logs in `/workspace/.vast-box/logs/`. Runs once per repo.
+- **Stop, don't destroy**: a stopped box keeps its disk (logins, repos, HF cache in `/workspace/.hf_home`), and the
+  SSH/T3 entry survives restarts: it reaches the box via `ProxyCommand vast-box proxy <id>`, which re-asks the vast API
+  when the box's port has moved.
+
+The box side is two scripts in `mutils/vast/`: `provision.sh` (tools, no secrets; the template fetches it from GitHub
+`main`, so push changes to it) and `configure.sh` (secrets, gh, repos, envs; piped over SSH stdin).
 
 ## Using `mutils.sweep` in a new project
 

@@ -7,7 +7,7 @@ import json
 import uuid
 from typing import Any, Mapping, Sequence
 
-__all__ = ["token_heatmap_html", "token_heatmap_explorer"]
+__all__ = ["token_heatmap_html", "token_heatmap_explorer", "in_iframe"]
 
 POS_RGB, NEG_RGB = (214, 39, 40), (31, 119, 180)  # red for > 0, blue for < 0
 
@@ -224,3 +224,10 @@ def token_heatmap_explorer(
         .replace("__TOPK__", str(top_k))
         .replace("__DATA__", json.dumps(data).replace("</", "<\\/"))  # keep token text like "</s>" from closing the script
     )
+
+
+def in_iframe(page: str, height: int = 900) -> str:
+    """`page` inside an <iframe srcdoc>, so its scripts run wherever it is shown. Notebook hosts such as VS Code's
+    Interactive Window can insert HTML output with innerHTML, which never executes <script> tags; the iframe is its own
+    document, so the page stays interactive. Show it with `IPython.display.HTML(in_iframe(page))`."""
+    return f'<iframe srcdoc="{html.escape(page)}" style="width: 100%; height: {height}px; border: 0"></iframe>'
