@@ -28,12 +28,14 @@ def token_heatmap_html(tokens: Sequence[str], values: Sequence[float], vmax: flo
         text = html.escape(tok).replace("\n", "↵\n").encode("ascii", "xmlcharrefreplace").decode()
         spans.append(f'<span title="{v:.3f}" style="background:rgba({r},{g},{b},{min(abs(v) / vmax, 1):.2f})">{text}</span>')
     header = f'<div style="font-weight:bold">{html.escape(label)}</div>' if label else ""
-    return f'<div style="font-family:monospace;white-space:pre-wrap;line-height:1.6;margin:12px 0">{header}{"".join(spans)}</div>'
+    style = "font-family:monospace;white-space:pre-wrap;line-height:1.6;margin:12px 0;padding:8px;background:#fff;color:#111"
+    return f'<div style="{style}">{header}{"".join(spans)}</div>'
 
 
 _EXPLORER_TEMPLATE = r"""<div id="__UID__">
 <style>
-#__UID__ {font-family: system-ui, sans-serif}
+/* always light, even in dark-themed hosts (e.g. VS Code dark mode) */
+#__UID__ {font-family: system-ui, sans-serif; background: #fff; color: #111; color-scheme: light; padding: 8px}
 #__UID__ .controls {display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin: 8px 0}
 #__UID__ .legend {color: #666; font-size: 12px; margin-bottom: 12px}
 #__UID__ .tokens {font-family: monospace; white-space: pre-wrap; line-height: 1.7}
@@ -52,7 +54,8 @@ _EXPLORER_TEMPLATE = r"""<div id="__UID__">
 #__UID__ td.ctx, #__UID__ td.mono {font-family: monospace; white-space: pre}
 #__UID__ td svg {display: block}
 #__UID__ .nav {display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; font: 11px system-ui; color: #666}
-#__UID__ .nav button {border: 1px solid #ccc; background: #fff; border-radius: 3px; padding: 0 5px; cursor: pointer; line-height: 16px}
+#__UID__ .nav button {border: 1px solid #ccc; background: #fff; color: #111; border-radius: 3px; padding: 0 5px; cursor: pointer;
+  line-height: 16px}
 #__UID__ .count {display: inline-block; min-width: 9.5em; text-align: center}
 #__UID__ tbody tr {cursor: pointer}
 #__UID__ tbody tr:hover {background: #f4f4f4}
@@ -230,4 +233,4 @@ def in_iframe(page: str, height: int = 900) -> str:
     """`page` inside an <iframe srcdoc>, so its scripts run wherever it is shown. Notebook hosts such as VS Code's
     Interactive Window can insert HTML output with innerHTML, which never executes <script> tags; the iframe is its own
     document, so the page stays interactive. Show it with `IPython.display.HTML(in_iframe(page))`."""
-    return f'<iframe srcdoc="{html.escape(page)}" style="width: 100%; height: {height}px; border: 0"></iframe>'
+    return f'<iframe srcdoc="{html.escape(page)}" style="width: 100%; height: {height}px; border: 0; background: #fff"></iframe>'
