@@ -41,18 +41,38 @@ _EXPLORER_TEMPLATE = r"""<div id="__UID__">
 #__UID__ .tok:hover {outline: 1px solid #333}
 #__UID__ .tok:hover::after {content: attr(data-v); position: absolute; left: 0; bottom: 100%; z-index: 1; pointer-events: none;
   background: #222; color: #fff; font: 11px monospace; padding: 1px 4px; border-radius: 3px; white-space: nowrap}
+#__UID__ .hit .txt {outline: 2px solid #000; outline-offset: 1px}
 #__UID__ .val {display: none}
 #__UID__ .show-values .tok {display: inline-flex; flex-direction: column; vertical-align: top; margin: 0 5px 6px 0}
 #__UID__ .show-values .val {display: block; font-size: 9px; color: #444; text-align: center}
+#__UID__ .topk {display: flex; flex-wrap: wrap; gap: 32px; margin-top: 24px}
+#__UID__ table {border-collapse: collapse; font-size: 12px}
+#__UID__ caption {font-weight: bold; text-align: left; padding-bottom: 4px}
+#__UID__ th, #__UID__ td {padding: 2px 8px; border-bottom: 1px solid #eee; text-align: left}
+#__UID__ td.ctx {font-family: monospace; white-space: pre}
+#__UID__ tbody tr {cursor: pointer}
+#__UID__ tbody tr:hover {background: #f4f4f4}
 </style>
 __TITLE__
-<div class="controls"><label><input type="checkbox"> show values</label></div>
-<div class="legend">red &gt; 0 &gt; blue, full colour at |value| &ge; __VMAX__; hover a token to see its value</div>
+<div class="controls">
+  <label><input type="checkbox"> show values</label>
+  <label>top k <input type="number" min="1" value="__TOPK__" style="width: 4em"></label>
+</div>
+<div class="legend">red &gt; 0 &gt; blue, full colour at |value| &ge; __VMAX__;
+  hover a token to see its value, click a table row to find it</div>
 <div class="tokens"></div>
+<div class="topk"></div>
 <script>
 (() => {
   const D = __DATA__, root = document.getElementById("__UID__");
-  const out = root.querySelector(".tokens"), box = root.querySelector("input[type=checkbox]");
+  const [out, tables] = [".tokens", ".topk"].map(q => root.querySelector(q));
+  const [box, kInput] = root.querySelectorAll(".controls input");
+  const el = (tag, cls = "", text = "") => Object.assign(document.createElement(tag), {className: cls, textContent: text});
+  const show = t => t.replaceAll("\n", "\u21b5");  // newlines are drawn as a visible symbol
+  const shade = v => {
+    const [r, g, b] = v > 0 ? D.pos : D.neg;
+    return `rgba(${r},${g},${b},${Math.min(Math.abs(v) / D.vmax, 1).toFixed(2)})`;
+  };
   const selects = D.dims.map(dim => {
     const sel = document.createElement("select"), label = document.createElement("label");
     for (const v of new Set(D.rows.map(r => r[dim]))) sel.add(new Option(v, v));
@@ -63,24 +83,49 @@ __TITLE__
   });
   root.querySelector(".controls").prepend(...selects.map(s => s.parentElement));
   box.onchange = () => out.classList.toggle("show-values", box.checked);
+  kInput.oninput = render;
+  let spans = [];
 
-  function token(t, v) {  // newlines are drawn as a visible symbol inside the token, then broken after it
-    const [r, g, b] = v > 0 ? D.pos : D.neg, [span, text, val] = ["tok", "txt", "val"].map(cls => {
-      const el = document.createElement("span");
-      el.className = cls;
-      return el;
-    });
+  function token(t, v) {
+    const span = el("span", "tok"), text = el("span", "txt", show(t));
     span.dataset.v = v.toFixed(3);
-    text.style.background = `rgba(${r},${g},${b},${Math.min(Math.abs(v) / D.vmax, 1).toFixed(2)})`;
-    text.textContent = t.replaceAll("\n", "\u21b5");
-    val.textContent = v.toFixed(2);  // shown under the token by the "show values" checkbox
-    span.append(text, val);
-    return [span, "\n".repeat((t.match(/\n/g) || []).length)];
+    text.style.background = shade(v);
+    span.append(text, el("span", "val", v.toFixed(2)));  // shown under the token by the "show values" checkbox
+    return span;
+  }
+  function topTable(title, order, row) {  // one table row per token; clicking it scrolls to the token in the text
+    const table = el("table");
+    table.createCaption().textContent = title;
+    const head = table.createTHead().insertRow(), body = table.createTBody();
+    for (const h of ["#", "value", "position", "token in context"]) head.append(el("th", "", h));
+    order.forEach((i, rank) => {
+      const tr = body.insertRow(), value = el("td", "", row.values[i].toFixed(3)), ctx = el("td", "ctx");
+      value.style.background = shade(row.values[i]);
+      const [before, after] = [row.tokens.slice(Math.max(0, i - 8), i), row.tokens.slice(i + 1, i + 4)].map(ts => show(ts.join("")));
+      ctx.append(before, el("b", "", show(row.tokens[i])), after);
+      tr.append(el("td", "", rank + 1), value, el("td", "", i), ctx);
+      tr.onclick = () => {
+        spans.forEach(s => s.classList.remove("hit"));
+        spans[i].classList.add("hit");
+        spans[i].scrollIntoView({block: "center"});
+      };
+    });
+    return table;
   }
   function render() {
     const row = D.rows.find(r => D.dims.every((d, i) => r[d] === selects[i].value));
-    if (!row) return out.replaceChildren("no data for this selection");
-    out.replaceChildren(...row.tokens.flatMap((t, i) => token(t, row.values[i])));
+    if (!row) {
+      tables.replaceChildren();
+      return out.replaceChildren("no data for this selection");
+    }
+    spans = row.tokens.map((t, i) => token(t, row.values[i]));
+    out.replaceChildren(...spans.flatMap((s, i) => [s, "\n".repeat((row.tokens[i].match(/\n/g) || []).length)]));
+    const k = Math.max(1, parseInt(kInput.value) || D.topK);
+    const order = row.values.map((_, i) => i).sort((a, b) => row.values[b] - row.values[a]);
+    tables.replaceChildren(
+      topTable(`top ${k} positive`, order.slice(0, k), row),
+      topTable(`top ${k} negative`, order.slice(-k).reverse(), row),
+    );
   }
   render();
 })();
@@ -94,12 +139,15 @@ def token_heatmap_explorer(
     vmax: float | None = None,
     initial: Mapping[str, Any] | None = None,
     title: str | None = None,
+    top_k: int = 10,
 ) -> str:
     """Interactive HTML for browsing many token heatmaps, one at a time.
 
     Each row has a value for every key in `dims` (e.g. layer, system prompt, user prompt) plus `tokens` and `values`.
     The page gets one dropdown per dim (options in first-seen order, preselected from `initial`) and shows the matching
     row shaded like `token_heatmap_html`. Hovering a token shows its value; a checkbox prints values under the tokens.
+    Below the text, two tables list the `top_k` most positive and most negative tokens with their context (k is also
+    editable on the page); clicking a table row scrolls to that token.
     `vmax` (default: max |value| over all rows) is shared by every row so selections compare. Returns a pure-ASCII
     fragment: write it to a .html file or show it in a notebook with `IPython.display.HTML`.
     """
@@ -112,6 +160,7 @@ def token_heatmap_explorer(
         "initial": {d: str(v) for d, v in (initial or {}).items()},
         "pos": POS_RGB,
         "neg": NEG_RGB,
+        "topK": top_k,
     }
     data["vmax"] = vmax or max((abs(v) for r in data["rows"] for v in r["values"]), default=0.0) or 1.0
     title_html = f"<h3>{html.escape(title)}</h3>".encode("ascii", "xmlcharrefreplace").decode() if title else ""
@@ -119,5 +168,6 @@ def token_heatmap_explorer(
         _EXPLORER_TEMPLATE.replace("__UID__", f"tx-{uuid.uuid4().hex[:8]}")
         .replace("__TITLE__", title_html)
         .replace("__VMAX__", f"{data['vmax']:.2f}")
+        .replace("__TOPK__", str(top_k))
         .replace("__DATA__", json.dumps(data).replace("</", "<\\/"))  # keep token text like "</s>" from closing the script
     )
