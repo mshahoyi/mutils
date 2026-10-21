@@ -58,6 +58,7 @@ _EXPLORER_TEMPLATE = r"""<div id="__UID__">
   line-height: 16px}
 #__UID__ .count {display: inline-block; min-width: 9.5em; text-align: center}
 #__UID__ input.re {width: 11em; font-family: monospace}
+#__UID__ .focal {outline: 1.5px solid #000}
 #__UID__ input.re.bad {outline: 2px solid #d62728}
 #__UID__ tbody tr {cursor: pointer}
 #__UID__ tbody tr:hover {background: #f4f4f4}
@@ -148,10 +149,16 @@ __TITLE__
     let j = 0;
     const step = d => {
       j = (j + d + idx.length) % idx.length;
-      const i = idx[j];
-      const [before, after] = [row.tokens.slice(Math.max(0, i - 8), i), row.tokens.slice(i + 1, i + 4)].map(ts => show(ts.join("")));
+      const i = idx[j], from = Math.max(0, i - 8), to = Math.min(row.tokens.length, i + 4);  // 8 tokens before, 3 after
       count.textContent = `${j + 1}/${idx.length}: ${row.values[i].toFixed(2)} at ${i}`;
-      text.replaceChildren(before, el("b", "", show(row.tokens[i])), after);
+      text.replaceChildren(
+        ...Array.from({length: to - from}, (_, o) => {  // every context token shaded by its own value, the focal one outlined
+          const p = from + o, piece = el(p === i ? "b" : "span", p === i ? "focal" : "", show(row.tokens[p]));
+          piece.style.background = shade(row.values[p]);
+          piece.title = row.values[p].toFixed(3);
+          return piece;
+        }),
+      );
     };
     prev.onclick = e => (e.stopPropagation(), step(-1));
     next.onclick = e => (e.stopPropagation(), step(1));
