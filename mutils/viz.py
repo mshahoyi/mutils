@@ -73,7 +73,8 @@ __TITLE__
 <div class="legend">red &gt; 0 &gt; blue, full colour at |value| &ge; __VMAX__;
   hover a token to see its value. Tables group repeated tokens: step through a token's occurrences in text order with the
   &lsaquo; &rsaquo; by its context (or &larr; &rarr; while hovering its row), or to the next lower / higher value with the
-  &lsaquo; &rsaquo; by its distribution (or shift + &larr; &rarr;); click the row to find the one shown</div>
+  &lsaquo; &rsaquo; by its distribution (or shift + &larr; &rarr;); &laquo; &raquo; (or Home / End) jump to the first / last;
+  click the row to find the one shown</div>
 <div class="tokens"></div>
 <div class="topk"></div>
 <script>
@@ -109,10 +110,12 @@ __TITLE__
   box.onchange = () => out.classList.toggle("show-values", box.checked);
   kInput.oninput = includeInput.oninput = excludeInput.oninput = render;
   let spans = [], stepHovered = null;  // stepHovered: the occurrence steppers of the table row under the mouse
-  document.addEventListener("keydown", e => {  // <- / ->: previous / next in the text; with shift: next lower / higher value
-    if (!stepHovered || !["ArrowLeft", "ArrowRight"].includes(e.key)) return;
+  document.addEventListener("keydown", e => {  // <- / -> step, Home / End jump; in text order, or by value with shift
+    if (!stepHovered || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
     e.preventDefault();
-    (e.shiftKey ? stepHovered.stepValue : stepHovered.stepPos)(e.key === "ArrowRight" ? 1 : -1);
+    const {list, step} = stepHovered.steppers[e.shiftKey ? "value" : "text"];
+    if (e.key === "Home" || e.key === "End") stepHovered.go(list, e.key === "Home" ? 0 : list.length - 1);
+    else step(e.key === "ArrowRight" ? 1 : -1);
   });
 
   function token(t, v) {
@@ -164,22 +167,30 @@ __TITLE__
       );
       plot.innerHTML = strip(g, row.values[cur]);
     };
-    const stepPos = d => ((cur = byPos[(byPos.indexOf(cur) + d + byPos.length) % byPos.length]), draw());  // wraps around the text
-    const stepValue = d => {  // stops at the ends of the distribution
-      cur = byValue[Math.max(0, Math.min(byValue.length - 1, byValue.indexOf(cur) + d))];
-      draw();
+    const go = (list, k) => ((cur = list[k]), draw());
+    const steppers = {  // text order wraps around; value order stops at the ends of the distribution
+      text: {list: byPos, step: d => go(byPos, (byPos.indexOf(cur) + d + byPos.length) % byPos.length), what: "occurrence in the text"},
+      value: {list: byValue, step: d => go(byValue, Math.max(0, Math.min(byValue.length - 1, byValue.indexOf(cur) + d))), what: "value"},
     };
-    const nav = (step, middle) => {
-      const box = el("span", "nav"), [prev, next] = [el("button", "", "\u2039"), el("button", "", "\u203a")];
-      prev.onclick = e => (e.stopPropagation(), step(-1));
-      next.onclick = e => (e.stopPropagation(), step(1));
-      box.append(prev, middle, next);
+    const nav = ({list, step, what}, middle) => {  // << < middle > >>: first, previous, next, last
+      const button = (label, title, action) => {
+        const b = el("button", "", label);
+        b.title = title;
+        b.onclick = e => (e.stopPropagation(), action());
+        return b;
+      };
+      const [first, last] = what === "value" ? ["lowest value", "highest value"] : ["first occurrence", "last occurrence"];
+      const box = el("span", "nav");
+      box.append(
+        button("\u00ab", first, () => go(list, 0)), button("\u2039", `previous ${what}`, () => step(-1)), middle,
+        button("\u203a", `next ${what}`, () => step(1)), button("\u00bb", last, () => go(list, list.length - 1)),
+      );
       return box;
     };
-    ctx.append(nav(stepPos, count), text);
-    dist.append(nav(stepValue, plot));
+    ctx.append(nav(steppers.text, count), text);
+    dist.append(nav(steppers.value, plot));
     draw();
-    return {ctx, dist, stepPos, stepValue, current: () => cur};
+    return {ctx, dist, steppers, go, current: () => cur};
   }
   function topTable(title, gs, order, row) {  // one table row per distinct token
     const table = el("table");
