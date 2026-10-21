@@ -57,6 +57,8 @@ _EXPLORER_TEMPLATE = r"""<div id="__UID__">
 #__UID__ .nav button {border: 1px solid #ccc; background: #fff; color: #111; border-radius: 3px; padding: 0 5px; cursor: pointer;
   line-height: 16px}
 #__UID__ .count {display: inline-block; min-width: 9.5em; text-align: center}
+#__UID__ input.re {width: 11em; font-family: monospace}
+#__UID__ input.re.bad {outline: 2px solid #d62728}
 #__UID__ tbody tr {cursor: pointer}
 #__UID__ tbody tr:hover {background: #f4f4f4}
 </style>
@@ -64,6 +66,8 @@ __TITLE__
 <div class="controls">
   <label><input type="checkbox"> show values</label>
   <label>top k <input type="number" min="1" value="__TOPK__" style="width: 4em"></label>
+  <label>include <input type="text" class="re" placeholder="regex, e.g. ^[.,]$" value="__INCLUDE__"></label>
+  <label>exclude <input type="text" class="re" placeholder="regex, e.g. ^&lt;\|" value="__EXCLUDE__"></label>
 </div>
 <div class="legend">red &gt; 0 &gt; blue, full colour at |value| &ge; __VMAX__;
   hover a token to see its value. Tables group repeated tokens; step through a token's occurrences with &lsaquo; &rsaquo;
@@ -74,7 +78,17 @@ __TITLE__
 (() => {
   const D = __DATA__, root = document.getElementById("__UID__");
   const [out, tables] = [".tokens", ".topk"].map(q => root.querySelector(q));
-  const [box, kInput] = root.querySelectorAll(".controls input");
+  const [box, kInput, includeInput, excludeInput] = root.querySelectorAll(".controls input");
+  const regex = input => {  // null when empty; an invalid pattern is flagged and ignored
+    input.classList.remove("bad");
+    if (!input.value) return null;
+    try {
+      return new RegExp(input.value);
+    } catch {
+      input.classList.add("bad");
+      return null;
+    }
+  };
   const el = (tag, cls = "", text = "") => Object.assign(document.createElement(tag), {className: cls, textContent: text});
   const show = t => t.replaceAll("\n", "\u21b5");  // newlines are drawn as a visible symbol
   const shade = v => {
@@ -91,7 +105,7 @@ __TITLE__
   });
   root.querySelector(".controls").prepend(...selects.map(s => s.parentElement));
   box.onchange = () => out.classList.toggle("show-values", box.checked);
-  kInput.oninput = render;
+  kInput.oninput = includeInput.oninput = excludeInput.oninput = render;
   let spans = [], stepHovered = null;  // stepHovered: the occurrence stepper of the table row under the mouse
   document.addEventListener("keydown", e => {
     if (!stepHovered || !["ArrowLeft", "ArrowRight"].includes(e.key)) return;
@@ -175,11 +189,14 @@ __TITLE__
     }
     spans = row.tokens.map((t, i) => token(t, row.values[i]));
     out.replaceChildren(...spans.flatMap((s, i) => [s, "\n".repeat((row.tokens[i].match(/\n/g) || []).length)]));
-    const k = Math.max(1, parseInt(kInput.value) || D.topK), gs = groups(row).sort((a, b) => b.median - a.median);
+    const k = Math.max(1, parseInt(kInput.value) || D.topK), include = regex(includeInput), exclude = regex(excludeInput);
+    const gs = groups(row)  // the include / exclude regexes are matched against the raw token text
+      .filter(g => (!include || include.test(g.tok)) && !(exclude && exclude.test(g.tok)))
+      .sort((a, b) => b.median - a.median);
     stepHovered = null;
     tables.replaceChildren(
-      topTable(`top ${k} positive tokens (by median)`, gs.slice(0, k), -1, row),
-      topTable(`top ${k} negative tokens (by median)`, gs.slice(-k).reverse(), 1, row),
+      topTable(`top ${k} positive of ${gs.length} distinct tokens (by median)`, gs.slice(0, k), -1, row),
+      topTable(`top ${k} negative of ${gs.length} distinct tokens (by median)`, gs.slice(-k).reverse(), 1, row),
     );
   }
   render();
@@ -195,15 +212,19 @@ def token_heatmap_explorer(
     initial: Mapping[str, Any] | None = None,
     title: str | None = None,
     top_k: int = 10,
+    include: str = "",
+    exclude: str = "",
 ) -> str:
-    """Interactive HTML for browsing many token heatmaps, one at a time.
+    r"""Interactive HTML for browsing many token heatmaps, one at a time.
 
     Each row has a value for every key in `dims` (e.g. layer, system prompt, user prompt) plus `tokens` and `values`.
     The page gets one dropdown per dim (options in first-seen order, preselected from `initial`) and shows the matching
     row shaded like `token_heatmap_html`. Hovering a token shows its value; a checkbox prints values under the tokens.
     Below the text, two tables list the `top_k` distinct tokens with the highest and lowest median value (k is also
     editable on the page): occurrence count, median, a strip plot of all occurrences, and each occurrence in context,
-    stepped through with buttons or the arrow keys; clicking a row scrolls to the occurrence shown.
+    stepped through with buttons or the arrow keys; clicking a row scrolls to the occurrence shown. `include` / `exclude`
+    are initial JavaScript regexes (editable on the page) that keep / drop tokens from the tables, e.g. include="^[.,]$"
+    for only commas and full stops, exclude=r"^<\|" to hide special tokens.
     `vmax` (default: max |value| over all rows) is shared by every row so selections compare. Returns a pure-ASCII
     fragment: write it to a .html file or show it in a notebook with `IPython.display.HTML`.
     """
@@ -220,11 +241,14 @@ def token_heatmap_explorer(
     }
     data["vmax"] = vmax or max((abs(v) for r in data["rows"] for v in r["values"]), default=0.0) or 1.0
     title_html = f"<h3>{html.escape(title)}</h3>".encode("ascii", "xmlcharrefreplace").decode() if title else ""
+    attr = lambda v: html.escape(v).encode("ascii", "xmlcharrefreplace").decode()  # noqa: E731 - attribute-safe, pure ASCII
     return (
         _EXPLORER_TEMPLATE.replace("__UID__", f"tx-{uuid.uuid4().hex[:8]}")
         .replace("__TITLE__", title_html)
         .replace("__VMAX__", f"{data['vmax']:.2f}")
         .replace("__TOPK__", str(top_k))
+        .replace("__INCLUDE__", attr(include))
+        .replace("__EXCLUDE__", attr(exclude))
         .replace("__DATA__", json.dumps(data).replace("</", "<\\/"))  # keep token text like "</s>" from closing the script
     )
 
