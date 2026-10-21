@@ -71,8 +71,9 @@ __TITLE__
   <label>exclude <input type="text" class="re" placeholder="regex, e.g. ^&lt;\|" value="__EXCLUDE__"></label>
 </div>
 <div class="legend">red &gt; 0 &gt; blue, full colour at |value| &ge; __VMAX__;
-  hover a token to see its value. Tables group repeated tokens; step through a token's occurrences with &lsaquo; &rsaquo;
-  (or &larr; &rarr; while hovering its row) and click the row to find the one shown</div>
+  hover a token to see its value. Tables group repeated tokens: step through a token's occurrences in text order with the
+  &lsaquo; &rsaquo; by its context (or &larr; &rarr; while hovering its row), or to the next lower / higher value with the
+  &lsaquo; &rsaquo; by its distribution (or shift + &larr; &rarr;); click the row to find the one shown</div>
 <div class="tokens"></div>
 <div class="topk"></div>
 <script>
@@ -107,11 +108,11 @@ __TITLE__
   root.querySelector(".controls").prepend(...selects.map(s => s.parentElement));
   box.onchange = () => out.classList.toggle("show-values", box.checked);
   kInput.oninput = includeInput.oninput = excludeInput.oninput = render;
-  let spans = [], stepHovered = null;  // stepHovered: the occurrence stepper of the table row under the mouse
-  document.addEventListener("keydown", e => {
+  let spans = [], stepHovered = null;  // stepHovered: the occurrence steppers of the table row under the mouse
+  document.addEventListener("keydown", e => {  // <- / ->: previous / next in the text; with shift: next lower / higher value
     if (!stepHovered || !["ArrowLeft", "ArrowRight"].includes(e.key)) return;
     e.preventDefault();
-    stepHovered(e.key === "ArrowRight" ? 1 : -1);
+    (e.shiftKey ? stepHovered.stepValue : stepHovered.stepPos)(e.key === "ArrowRight" ? 1 : -1);
   });
 
   function token(t, v) {
@@ -132,40 +133,53 @@ __TITLE__
       return {tok, idx, values, median: values.length % 2 ? values[m] : (values[m - 1] + values[m]) / 2};
     });
   }
-  function strip(g) {  // every occurrence as a tick on the shared -vmax..vmax scale, the median as a black bar
-    const W = 120, H = 16, x = v => (((Math.max(-1, Math.min(1, v / D.vmax)) + 1) * W) / 2).toFixed(1);
+  function strip(g, current) {  // every occurrence as a tick on the shared -vmax..vmax scale, the median as a black bar,
+    // and a triangle over the occurrence currently shown
+    const W = 120, H = 18, x = v => ((Math.max(-1, Math.min(1, v / D.vmax)) + 1) * W) / 2;
     const tick = (v, colour, y0, y1, width, opacity = 1) =>
-      `<line x1="${x(v)}" x2="${x(v)}" y1="${y0}" y2="${y1}" stroke="${colour}" stroke-width="${width}" stroke-opacity="${opacity}"/>`;
+      `<line x1="${x(v).toFixed(1)}" x2="${x(v).toFixed(1)}" y1="${y0}" y2="${y1}" stroke="${colour}" `
+      + `stroke-width="${width}" stroke-opacity="${opacity}"/>`;
     const [lo, hi] = [g.values[0], g.values[g.values.length - 1]].map(v => v.toFixed(2));
     const title = `${g.values.length} occurrences: min ${lo}, median ${g.median.toFixed(2)}, max ${hi}`;
+    const c = x(current).toFixed(1), marker = `<path d="M${(x(current) - 4).toFixed(1)},0 L${(x(current) + 4).toFixed(1)},0 L${c},6 Z"/>`;
     return `<svg width="${W}" height="${H}"><title>${title}</title>`
-      + `<line x1="0" x2="${W}" y1="${H / 2}" y2="${H / 2}" stroke="#ddd"/>` + tick(0, "#bbb", 2, H - 2, 1)
-      + g.values.map(v => tick(v, `rgb(${(v > 0 ? D.pos : D.neg).join(",")})`, 4, H - 4, 1.5, 0.6)).join("")
-      + tick(g.median, "#000", 0, H, 2) + "</svg>";
+      + `<line x1="0" x2="${W}" y1="${H / 2 + 2}" y2="${H / 2 + 2}" stroke="#ddd"/>` + tick(0, "#bbb", 4, H, 1)
+      + g.values.map(v => tick(v, `rgb(${(v > 0 ? D.pos : D.neg).join(",")})`, 6, H - 2, 1.5, 0.6)).join("")
+      + tick(g.median, "#000", 4, H, 2) + marker + "</svg>";
   }
-  function examples(g, order, row) {  // one occurrence in context at a time, strongest first; returns [cell, step, current position]
-    const idx = [...g.idx].sort((a, b) => order * (row.values[a] - row.values[b])), cell = el("td", "ctx"), nav = el("span", "nav");
-    const [prev, count, next, text] = [el("button", "", "\u2039"), el("span", "count"), el("button", "", "\u203a"), el("span")];
-    let j = 0;
-    const step = d => {
-      j = (j + d + idx.length) % idx.length;
-      const i = idx[j], from = Math.max(0, i - 8), to = Math.min(row.tokens.length, i + 4);  // 8 tokens before, 3 after
-      count.textContent = `${j + 1}/${idx.length}: ${row.values[i].toFixed(2)} at ${i}`;
+  function occurrences(g, order, row) {  // the occurrence shown, steppable in text order (context) or by value (distribution)
+    const byPos = [...g.idx].sort((a, b) => a - b), byValue = [...g.idx].sort((a, b) => row.values[a] - row.values[b]);
+    let cur = order < 0 ? byValue[byValue.length - 1] : byValue[0];  // start at the strongest occurrence
+    const [ctx, dist, count, text, plot] = [el("td", "ctx"), el("td"), el("span", "count"), el("span"), el("span")];
+    const draw = () => {
+      const from = Math.max(0, cur - 8), to = Math.min(row.tokens.length, cur + 4);  // 8 tokens before, 3 after
+      count.textContent = `${byPos.indexOf(cur) + 1}/${byPos.length}: ${row.values[cur].toFixed(2)} at ${cur}`;
       text.replaceChildren(
         ...Array.from({length: to - from}, (_, o) => {  // every context token shaded by its own value, the focal one outlined
-          const p = from + o, piece = el(p === i ? "b" : "span", p === i ? "focal" : "", show(row.tokens[p]));
+          const p = from + o, piece = el(p === cur ? "b" : "span", p === cur ? "focal" : "", show(row.tokens[p]));
           piece.style.background = shade(row.values[p]);
           piece.title = row.values[p].toFixed(3);
           return piece;
         }),
       );
+      plot.innerHTML = strip(g, row.values[cur]);
     };
-    prev.onclick = e => (e.stopPropagation(), step(-1));
-    next.onclick = e => (e.stopPropagation(), step(1));
-    nav.append(prev, count, next);
-    cell.append(nav, text);
-    step(0);
-    return [cell, step, () => idx[j]];
+    const stepPos = d => ((cur = byPos[(byPos.indexOf(cur) + d + byPos.length) % byPos.length]), draw());  // wraps around the text
+    const stepValue = d => {  // stops at the ends of the distribution
+      cur = byValue[Math.max(0, Math.min(byValue.length - 1, byValue.indexOf(cur) + d))];
+      draw();
+    };
+    const nav = (step, middle) => {
+      const box = el("span", "nav"), [prev, next] = [el("button", "", "\u2039"), el("button", "", "\u203a")];
+      prev.onclick = e => (e.stopPropagation(), step(-1));
+      next.onclick = e => (e.stopPropagation(), step(1));
+      box.append(prev, middle, next);
+      return box;
+    };
+    ctx.append(nav(stepPos, count), text);
+    dist.append(nav(stepValue, plot));
+    draw();
+    return {ctx, dist, stepPos, stepValue, current: () => cur};
   }
   function topTable(title, gs, order, row) {  // one table row per distinct token
     const table = el("table");
@@ -173,17 +187,15 @@ __TITLE__
     const head = table.createTHead().insertRow(), body = table.createTBody();
     for (const h of ["#", "token", "n", "median", "distribution", "in context"]) head.append(el("th", "", h));
     gs.forEach((g, rank) => {
-      const tr = body.insertRow(), median = el("td", "", g.median.toFixed(3)), dist = el("td");
-      const [ctx, step, current] = examples(g, order, row);
+      const tr = body.insertRow(), median = el("td", "", g.median.toFixed(3)), occ = occurrences(g, order, row);
       median.style.background = shade(g.median);
-      dist.innerHTML = strip(g);
-      tr.append(el("td", "", rank + 1), el("td", "mono", JSON.stringify(g.tok)), el("td", "", g.idx.length), median, dist, ctx);
-      tr.onmouseenter = () => (stepHovered = step);
+      tr.append(el("td", "", rank + 1), el("td", "mono", JSON.stringify(g.tok)), el("td", "", g.idx.length), median, occ.dist, occ.ctx);
+      tr.onmouseenter = () => (stepHovered = occ);
       tr.onmouseleave = () => (stepHovered = null);
       tr.onclick = () => {
         spans.forEach(s => s.classList.remove("hit"));
-        spans[current()].classList.add("hit");
-        spans[current()].scrollIntoView({block: "center"});
+        spans[occ.current()].classList.add("hit");
+        spans[occ.current()].scrollIntoView({block: "center"});
       };
     });
     return table;
@@ -229,7 +241,8 @@ def token_heatmap_explorer(
     row shaded like `token_heatmap_html`. Hovering a token shows its value; a checkbox prints values under the tokens.
     Below the text, two tables list the `top_k` distinct tokens with the highest and lowest median value (k is also
     editable on the page): occurrence count, median, a strip plot of all occurrences, and each occurrence in context,
-    stepped through with buttons or the arrow keys; clicking a row scrolls to the occurrence shown. `include` / `exclude`
+    stepped through in text order or by value (buttons by the context / the distribution, or arrow keys / shift + arrow
+    keys); clicking a row scrolls to the occurrence shown. `include` / `exclude`
     are initial JavaScript regexes (editable on the page) that keep / drop tokens from the tables, e.g. include="^[.,]$"
     for only commas and full stops, exclude=r"^<\|" to hide special tokens.
     `vmax` (default: max |value| over all rows) is shared by every row so selections compare. Returns a pure-ASCII
