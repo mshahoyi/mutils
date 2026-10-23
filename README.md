@@ -39,6 +39,7 @@ Pin a SHA, not a branch, so old experiments stay reproducible.
 - `mutils.vllm_utils` — vLLM equivalent with multi-LoRA per-prompt noise injection
 - `mutils.search` — golden-section search for unimodal curves
 - `mutils.constants` — prompt templates, in-context secret strings
+- `mutils.cache` — `cached(path, compute, key=...)`: disk-cache an expensive step, recomputed only when `key` (its inputs) changes
 - `mutils.data` — HF dataset loaders
 - `mutils.utils` — misc helpers (tokenization, perplexity, top-k)
 - `mutils.viz` — `token_heatmap_html`: text coloured per token by a value (e.g. probe projections), as HTML;
