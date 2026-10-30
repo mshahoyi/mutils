@@ -39,6 +39,8 @@ from .planner import DeploymentPlan, fetch_adapter_info, plan_deployment
 VLLM_PORT = 8000
 DEFAULT_VLLM_VERSION = "0.21.0"
 DEFAULT_CUDA_IMAGE = "nvidia/cuda:12.8.1-devel-ubuntu22.04"
+# GPUs whose arch the default image's nvcc can't target (FlashInfer JIT-compiles kernels at startup): B300 is sm_103, nvcc >= 12.9
+CUDA_IMAGE_FOR_GPU = {"B300": "nvidia/cuda:12.9.1-devel-ubuntu22.04"}
 _MINUTES = 60
 
 
@@ -196,6 +198,7 @@ class ModalVLLM:
         min_containers: keep N replicas warm (1 = no cold starts during iteration).
         max_containers: autoscaling ceiling (raise for the parallel phase).
         vllm_version: pinned vllm to install in the image.
+        cuda_image: base image (default: CUDA_IMAGE_FOR_GPU for the planned GPU, else DEFAULT_CUDA_IMAGE).
     """
 
     def __init__(
@@ -220,6 +223,7 @@ class ModalVLLM:
         max_containers: int = 1,
         startup_timeout: int = 20 * 60,
         vllm_version: str = DEFAULT_VLLM_VERSION,
+        cuda_image: Optional[str] = None,
     ):
         import os
 
@@ -257,6 +261,7 @@ class ModalVLLM:
             self.model, token=self.hf_token, gpu_type=gpu_type, gpu_count=gpu_count,
             max_model_len=max_model_len, gpu_memory_utilization=gpu_memory_utilization,
         )
+        self.cuda_image = cuda_image or CUDA_IMAGE_FOR_GPU.get(self.plan.gpu_type, DEFAULT_CUDA_IMAGE)
         # Default: skip CUDA-graph capture for multi-GPU (large) models, where
         # capture dominates startup; keep it for small single-GPU models.
         self.enforce_eager = enforce_eager if enforce_eager is not None else (self.plan.gpu_count > 1)
@@ -277,7 +282,7 @@ class ModalVLLM:
         """Deploy the app (provisions GPUs lazily on first request) and return the URL."""
         self._app, self._serve = build_app(
             self.plan, self.serve_cmd, app_name=self.app_name, lora_modules=self.lora_modules,
-            hf_token=self.hf_token, vllm_version=self.vllm_version,
+            hf_token=self.hf_token, vllm_version=self.vllm_version, cuda_image=self.cuda_image,
             min_containers=self.min_containers, max_containers=self.max_containers,
             startup_timeout=self.startup_timeout,
         )
