@@ -37,6 +37,7 @@ GPU_VRAM_GIB: dict[str, int] = {
     "H100": 80,
     "H200": 141,
     "B200": 180,
+    "B300": 268,  # 275040 MiB per nvidia-smi on Modal (sm_103)
 }
 
 # Bytes per parameter for the dtypes HF reports in the `safetensors.parameters` map.
